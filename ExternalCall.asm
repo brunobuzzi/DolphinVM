@@ -413,6 +413,32 @@ AnswerObjectResult MACRO
 	ret	
 ENDM
 
+AnswerStructResult MACRO
+	;; Pop the arguments as the last action
+	mov		edx, argCount
+	ASSUME	edx:DWORD
+	mov		ecx, callContext
+	ASSUME	ecx:PTR InterpRegisters
+
+	shl		edx, 2
+	
+	; Reload interpreter context registers
+	mov		_IP, [ecx].m_instructionPointer
+	mov		_SP, [ecx].m_stackPointer
+	mov		_BP, [ecx].m_basePointer
+	ASSUME	ecx:NOTHING
+	
+	test	eax, eax							; If ExternalStructure class is uninitialized, the New functions return NULL, and we want to fail the primitive
+	jz		localPrimitiveFailure2
+
+	sub _SP, edx								; Pop off the arguments, AFTER A COMPLETED CALL
+	mov		[_SP], RESULT						; Answer the result
+
+	AddToZct <a>
+	mov eax, _SP
+	ret
+ENDM
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; Answer an Integer result (could be SmallInteger, or a NEW LargeInteger)
 ;
@@ -428,6 +454,7 @@ AnswerOopResult MACRO
 	mov	eax, _SP								; primitiveSuccess(0)
 	ret
 ENDM
+
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Invoke any function, pushing args from the Smalltalk stack according to the
@@ -457,9 +484,10 @@ callExternalFunction PROC NEAR STDCALL,
 	callContext:PTR InterpRegisters,
 	pOverlapped:DWORD
 
-	
 	; We need EBP based address for these as we'll be modifying ESP
 	LOCAL activeFrame:PStackFrame, returnStructure:PTR DWORD	;, savedSP:PTR DWORD
+
+	ASSERTNEQU %INDEX, %DESCRIPTOR
 
 	; Save off active frame, etc
 	mov		eax, callContext
@@ -469,10 +497,11 @@ callExternalFunction PROC NEAR STDCALL,
 	mov		returnStructure, 0
 	mov		activeFrame, eax
 
-	cmp		[DESCRIPTOR].m_return, 40
-	je		retStruct										; If not returning a >8 byte struct, then no need to make space for return on stack
 	cmp		[DESCRIPTOR].m_return, ArgSTRUCT
-	jne		@F
+	je		retStruct								; If not returning a >8 byte struct, then no need to make space for return on stack
+
+	movzx	INDEX, [DESCRIPTOR].m_argsLen			; Get the length of the argument descriptor
+	LoopNext										; Process the first arg
 	
 retStruct:
 
@@ -495,17 +524,16 @@ retStruct:
 	ASSUME	edx:PTR Behavior
 
 	mov		cx, [edx].m_instanceSpec.m_extraSpec
+	test	ecx, ecx
+	jz		localPrimitiveFailure2					; ExternalStructure has uninitialized (zero) size, fail the call
+
 	sub		esp, ecx								; Make the space
 	mov		returnStructure, esp					; Save down the address for push as hidden parm
 
-@@:
-	; FROM NOW ON WE RESPECT USE OF THE REGISTER DEFINES FOR SAFETY
-
-	ASSERTNEQU %INDEX, %DESCRIPTOR
-
 	movzx	INDEX, [DESCRIPTOR].m_argsLen	; Get the length of the argument descriptor
-
 	LoopNext								; Process the first arg
+
+	LocalPrimitiveFailure 2
 
 performCall:
 	mov		eax, returnStructure
@@ -1658,6 +1686,9 @@ extCallRetOTE:
 ;;
 extCallRetLPVOID:
 	ASSERTNEQU	%RESULT, <edx>
+	test	RESULT, RESULT
+	jz		returnNil
+
 	mov		edx, [Pointers.ClassExternalAddress]
 	mov		ecx, RESULT
 	call	NEWDWORD
@@ -1884,10 +1915,13 @@ extCallRetLPSTR:
 	AnswerObjectResult
 
 extCallRetLPPVOID:
+	test	RESULT, RESULT
+	jz		returnNil
+
 	mov		edx, RESULT							; Load return value for use as pointer parm
 	mov		ecx, [Pointers.ClassLPVOID]			; Create an LPVOID instance ...
 	call	NewExternalStructurePointer			; ... containing a pointer (i.e. void**)
-	AnswerObjectResult
+	AnswerStructResult
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;
@@ -1965,13 +1999,16 @@ extCallRetGUID:
 extCallRetCOMPTR:		; N.B. Should really handle separately and AddRef this one
 extCallRetLPP:
 extCallRetLP:
+	test	RESULT, RESULT
+	jz		returnNil
+
 	mov		TEMPB, [DESCRIPTOR].m_returnParm	; Get return parm literal frame index into ECX
 	mov		edx, RESULT							; Load return value for use as pointer parm
 	mov		eax, [method]						; Load the method (NOT Interpreter::m_pMethod)
 	ASSUME	eax:PTR CompiledCodeObj
 	mov		ecx, [eax].m_aLiterals[TEMP*OOPSIZE]; Load literal from frame
 	call	NewExternalStructurePointer
-	AnswerObjectResult
+	AnswerStructResult
 
 extCallRetSTRUCT4:
 	push	RESULT								; Push result on stack, so can pass address to NewExternalStructure
@@ -1982,7 +2019,7 @@ extCallRetSTRUCT4:
 	mov		edx, esp							; Load return value for use as pointer parm
 	call	NewExternalStructure
 	pop		edx									; Fix the stack
-	AnswerObjectResult
+	AnswerStructResult
 
 extCallRetSTRUCT8:
 	push	edx									; Push result on stack, so can pass address to NewExternalStructure
@@ -1994,7 +2031,7 @@ extCallRetSTRUCT8:
 	mov		edx, esp							; Load return value for use as pointer parm
 	call	NewExternalStructure
 	add		esp, 8								; Pop temp result from stack
-	AnswerObjectResult
+	AnswerStructResult
 
 extCallRetSTRUCT:
 	mov		TEMPB, [DESCRIPTOR].m_returnParm	; Get return parm literal frame index into ECX
@@ -2004,7 +2041,7 @@ extCallRetSTRUCT:
 	ASSUME	eax:PTR CompiledCodeObj
 	mov		ecx, [eax].m_aLiterals[TEMP*OOPSIZE]; Load literal from frame
 	call	NewExternalStructure
-	AnswerObjectResult
+	AnswerStructResult
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;
@@ -2049,12 +2086,12 @@ pushOopTable	DD	OFFSET FLAT:extCallArgVOID			; 0
 	DD	OFFSET FLAT:extCallArgReserved		; 37
 	DD	OFFSET FLAT:extCallArgReserved		; 38
 	DD	OFFSET FLAT:extCallArgReserved		; 39
-	DD	OFFSET FLAT:ExtCallArgSTRUCT		; 40
-	DD	OFFSET FLAT:ExtCallArgSTRUCT4		; 41
-	DD	OFFSET FLAT:ExtCallArgSTRUCT8		; 42
-	DD	OFFSET FLAT:ExtCallArgLP			; 43
-	DD	OFFSET FLAT:ExtCallArgLPP			; 44
-	DD	OFFSET FLAT:ExtCallArgCOMPTR		; 45
+	DD	OFFSET FLAT:extCallArgReserved		; 40
+	DD	OFFSET FLAT:extCallArgReserved		; 41
+	DD	OFFSET FLAT:extCallArgReserved		; 42
+	DD	OFFSET FLAT:extCallArgReserved		; 43
+	DD	OFFSET FLAT:extCallArgReserved		; 44
+	DD	OFFSET FLAT:extCallArgReserved		; 45
 	DD	OFFSET FLAT:extCallArgReserved	    ; 46
 	DD	OFFSET FLAT:extCallArgReserved	    ; 47
 	DD	OFFSET FLAT:extCallArgReserved	    ; 48
@@ -2114,12 +2151,12 @@ returnOopTable	DD	OFFSET FLAT:extCallRetVOID			; 0
 	DD	OFFSET FLAT:extCallRetReserved	    ; 37
 	DD	OFFSET FLAT:extCallRetReserved	    ; 38
 	DD	OFFSET FLAT:extCallRetReserved	    ; 39
-	DD	OFFSET FLAT:extCallRetSTRUCT		; 40
-	DD	OFFSET FLAT:extCallRetSTRUCT4		; 41
-	DD	OFFSET FLAT:extCallRetSTRUCT8		; 42
-	DD	OFFSET FLAT:extCallRetLP			; 43
-	DD	OFFSET FLAT:extCallRetLPP			; 44
-	DD	OFFSET FLAT:extCallRetCOMPTR		; 45
+	DD	OFFSET FLAT:extCallRetReserved		; 40
+	DD	OFFSET FLAT:extCallRetReserved		; 41
+	DD	OFFSET FLAT:extCallRetReserved		; 42
+	DD	OFFSET FLAT:extCallRetReserved		; 43
+	DD	OFFSET FLAT:extCallRetReserved		; 44
+	DD	OFFSET FLAT:extCallRetReserved		; 45
 	DD	OFFSET FLAT:extCallRetReserved	    ; 46
 	DD	OFFSET FLAT:extCallRetReserved	    ; 47
 	DD	OFFSET FLAT:extCallRetReserved	    ; 48

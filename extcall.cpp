@@ -47,7 +47,13 @@ using namespace DolphinX;
 
 StructureOTE* __fastcall ExternalStructure::NewRefStruct(BehaviorOTE* classPointer, void* ptr)
 {
-	StructureOTE* resultPointer = reinterpret_cast<StructureOTE*>(ObjectMemory::newPointerObject(classPointer));
+	const Behavior* structClass = classPointer->m_location;
+	if (structClass->extraSpec() == 0)
+	{
+		// Uninitialized ExternalStructure
+		return NULL;
+	}
+	StructureOTE* resultPointer = reinterpret_cast<StructureOTE*>(ObjectMemory::newPointerObject(classPointer, structClass->fixedFields()));
 	ExternalStructure& extStruct = *resultPointer->m_location;
 	AddressOTE* oteAddress = ExternalAddress::New(ptr);
 	extStruct.m_contents = reinterpret_cast<BytesOTE*>(oteAddress);
@@ -77,6 +83,11 @@ OTE* __fastcall ExternalStructure::NewPointer(BehaviorOTE* classPointer, void* p
 		else
 		{
 			int nSize = behavior.extraSpec();
+			if (nSize == 0)
+			{
+				// Uninitialized ExternalStructure
+				return NULL;
+			}
 			BytesOTE* oteBytes = ObjectMemory::newByteObject(classPointer, nSize, ptr);
 			resultPointer = reinterpret_cast<OTE*>(oteBytes);
 		}
@@ -96,6 +107,11 @@ OTE* __fastcall ExternalStructure::New(BehaviorOTE* classPointer, void* ptr)
 	Behavior& behavior = *classPointer->m_location;
 	BytesOTE* bytesPointer;
 	unsigned size = behavior.extraSpec();
+	if (size == 0)
+	{
+		// Uninitialized ExternalStructure class - fail fast, as this will otherwise cause obscure problems later on when attempting to use the struct.
+		return NULL;
+	}
 	if (behavior.isPointers())
 	{
 		StructureOTE* otePointers = reinterpret_cast<StructureOTE*>(ObjectMemory::newPointerObject(classPointer));
